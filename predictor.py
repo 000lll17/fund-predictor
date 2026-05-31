@@ -1,5 +1,6 @@
 """
 ML 预测模块 — LSTM 时间序列预测 + XGBoost 涨跌分类。
+当 torch 不可用时自动降级为 XGBoost + 线性回归。
 """
 
 import os
@@ -10,6 +11,13 @@ import numpy as np
 import pandas as pd
 
 warnings.filterwarnings("ignore")
+
+# 检测 torch 是否可用
+try:
+    import torch
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
 
 MODEL_DIR = os.path.join(os.path.dirname(__file__), "models")
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -310,27 +318,37 @@ def train_and_predict(
 ) -> dict:
     """
     训练（或加载）模型并返回预测结果。
-
-    返回:
-        {
-            "lstm_pred": [未来N天净值预测列表],
-            "lstm_dates": [预测日期列表],
-            "xgb_up_prob": 明日上涨概率,
-            "lstm_trend": "看涨" / "看跌" / "震荡",
-            "confidence_note": 置信度说明,
-        }
+    当 torch 不可用时使用简单趋势外推替代 LSTM。
     """
     from indicators import compute_all
 
     df = compute_all(df)
 
-    # ---- LSTM ----
-    lstm = LSTMPredictor(pred_days=pred_days)
-    if not force_retrain and lstm.load(code):
-        pass  # 已加载缓存模型
+    # ---- LSTM (需要 torch) ----
+    lstm_pred = None
+    if _HAS_TORCH:
+        lstm = LSTMPredictor(pred_days=pred_days)
+        if not force_retrain and lstm.load(code):
+            pass
+        else:
+            lstm.train(df, epochs=50)
+            lstm.save(code)
+        lstm_pred = lstm.predict(df)
     else:
-        lstm.train(df, epochs=50)
-        lstm.save(code)
+        # 无 torch 时的简单趋势外推：使用近期均线趋势
+        recent_nav = df["nav"].tail(20).values
+        if len(recent_nav) >= 5:
+            # 线性回归拟合近期趋势
+            from sklearn.linear_model import LinearRegression
+            X = np.arange(len(recent_nav)).reshape(-1, 1)
+            y = recent_nav
+            lr = LinearRegression()
+            lr.fit(X, y)
+            last_idx = len(recent_nav) - 1
+            future_X = np.arange(last_idx + 1, last_idx + 1 + pred_days).reshape(-1, 1)
+            lstm_pred = lr.predict(future_X)
+        else:
+            lstm_pred = np.full(pred_days, df["nav"].iloc[-1])
 
     # ---- XGBoost ----
     xgb_clf = XGBoostClassifier()
@@ -339,19 +357,16 @@ def train_and_predict(
     else:
         xgb_clf.train(df)
         xgb_clf.save(code)
-
-    # ---- 执行预测 ----
-    lstm_pred = lstm.predict(df)
     up_prob = xgb_clf.predict_proba(df)
 
-    # 生成预测日期（跳过周末，简化处理）
+    # 生成预测日期（跳过周末）
     last_date = df["date"].iloc[-1]
     from datetime import timedelta
 
     future_dates = []
     d = last_date + timedelta(days=1)
     while len(future_dates) < pred_days:
-        if d.weekday() < 5:  # 周一到周五
+        if d.weekday() < 5:
             future_dates.append(d)
         d += timedelta(days=1)
 

@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: fund-predictor
+    env: python
+    region: singapore
+    buildCommand: pip install -r requirements-cloud.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true --server.enableStaticServing true
+    plan: free
