@@ -377,4 +377,7 @@ def train_and_predict(
         "confidence_note": confidence,
         "last_nav": round(float(last_nav), 4),
         "pred_change_pct": round(float((lstm_pred[-1] - last_nav) / last_nav * 100), 2),
+        "pred_days": pred_days,
+        "pred_min": round(float(lstm_pred.min()), 4),
+        "pred_max": round(float(lstm_pred.max()), 4),
     }

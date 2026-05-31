@@ -13,16 +13,40 @@ import streamlit as st
 
 # 页面配置
 st.set_page_config(
-    page_title="基金涨幅预测系统",
+    page_title="基金预测 AI 助手",
     page_icon="📈",
     layout="wide",
 )
+
+# PWA 注册 — 手机可安装到桌面
+st.markdown("""
+<link rel="manifest" href="/app/static/manifest.json">
+<script>
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/app/static/sw.js')
+        .then(() => console.log('PWA Service Worker registered'))
+        .catch(() => console.log('SW registration skipped'));
+}
+</script>
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="基金预测">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+""", unsafe_allow_html=True)
 
 # 导入自定义模块
 from data_fetcher import fetch_fund_nav, get_fund_name, clear_cache
 from indicators import compute_all, generate_signals, signal_summary
 from predictor import train_and_predict
 from report import generate_offline_report
+from news_fetcher import fetch_fund_news, fetch_market_overview
+from llm_analyzer import (
+    check_ollama_available,
+    analyze_news_sentiment,
+    generate_analysis_report,
+    chat_about_fund,
+    explain_prediction,
+)
 
 # ============================================================
 # 侧边栏 — 参数输入
@@ -68,6 +92,9 @@ pred_days = st.sidebar.slider(
     help="LSTM 预测未来多少个交易日的净值",
 )
 
+fetch_news = st.sidebar.checkbox("📰 联网抓取新闻", value=True,
+                               help="获取最新财经新闻并用 AI 分析情绪")
+
 col_a, col_b = st.sidebar.columns(2)
 with col_a:
     analyze_btn = st.sidebar.button("🚀 开始分析", type="primary", use_container_width=True)
@@ -77,7 +104,7 @@ with col_b:
 st.sidebar.markdown("---")
 st.sidebar.caption(
     "数据来源: akshare（东方财富等公开接口）\n"
-    "模型: LSTM 神经网络 + XGBoost"
+    "模型: LSTM + XGBoost + Ollama/Qwen"
 )
 
 # ============================================================
@@ -130,12 +157,39 @@ with st.spinner("正在计算技术指标..."):
     df = compute_all(df_raw)
     df_signal = generate_signals(df)
 
+# 新闻抓取
+news_list = []
+sentiment = {"sentiment_score": 0, "sentiment_label": "未抓取", "key_events": [], "summary": "未联网抓取新闻"}
+ollama_ok, ollama_msg = False, "未检测"
+
+if fetch_news:
+    with st.spinner("📰 正在抓取最新财经新闻..."):
+        try:
+            news_list = fetch_fund_news(code, fund_name, limit=15)
+            market_news = fetch_market_overview()
+            st.success(f"✅ 已获取 {len(news_list)} 条相关新闻 + {len(market_news)} 条市场要闻")
+        except Exception as e:
+            st.warning(f"新闻抓取部分失败: {e}")
+else:
+    news_list = []
+
+# Ollama 状态
+ollama_ok, ollama_msg = check_ollama_available()
+if not ollama_ok:
+    st.warning(f"⚠️ Ollama 大模型未就绪：{ollama_msg}。AI 智能分析将不可用。请运行 setup.bat 安装。")
+
+# 获取指标汇总（供多个 Tab 使用）
+summary = signal_summary(df_signal)
+
+# 预计算预测结果（Tab 4 和 Tab 5 共用）
+_result = None
+
 # ============================================================
 # Tab 布局
 # ============================================================
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["📊 历史走势", "📉 技术指标", "🔔 买卖信号", "🤖 AI 预测"]
+tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["📊 历史走势", "📉 技术指标", "🔔 买卖信号", "🤖 AI 预测", "🧠 智能分析"]
 )
 
 # ============================================================
@@ -260,9 +314,7 @@ with tab2:
 with tab3:
     st.subheader("交易信号检测")
 
-    summary = signal_summary(df_signal)
-
-    # 当前状态卡片
+    # 当前状态卡片（使用预计算的 summary）
     st.markdown("### 📋 当前状态")
     col_a, col_b, col_c, col_d = st.columns(4)
     with col_a:
@@ -333,7 +385,8 @@ with tab4:
 
     with st.spinner("正在训练模型并预测...（首次运行可能需要数十秒）"):
         try:
-            result = train_and_predict(df, code, pred_days=pred_days)
+            _result = train_and_predict(df, code, pred_days=pred_days)
+            result = _result
         except Exception as e:
             st.error(f"模型训练/预测失败: {e}")
             st.info("可能原因：数据量太少（建议至少半年以上数据）、数据质量问题等。请尝试扩大日期范围。")
@@ -633,6 +686,140 @@ with tab4:
                 )
 
             st.info("💡 **离线使用**：下载 .html 文件到手机后，用浏览器打开即可查看，无需联网、无需开电脑。")
+
+# ============================================================
+# Tab 5: AI 智能分析
+# ============================================================
+
+with tab5:
+    st.subheader("🧠 AI 智能分析（大模型驱动）")
+
+    if not ollama_ok:
+        st.error(f"❌ Ollama 不可用：{ollama_msg}")
+        st.info("""
+        **如何安装：**
+        1. 双击运行项目目录下的 `setup.bat`
+        2. 或手动安装：https://ollama.com/download/windows
+        3. 安装后运行：`ollama pull qwen2.5:7b`
+        4. 刷新本页面
+        """)
+    else:
+        st.success(f"✅ AI 大模型：{ollama_msg}")
+
+    # ---- 新闻列表 ----
+    if news_list and not (len(news_list) == 1 and "暂无" in news_list[0].get("title", "")):
+        st.markdown("### 📰 最新基金相关新闻")
+
+        for i, n in enumerate(news_list[:10]):
+            source_tag = f"`{n.get('source', '')}`" if n.get('source') else ""
+            time_tag = f"🕐 {n.get('time', '')}" if n.get('time') else ""
+            url = n.get('url', '')
+            title = n.get('title', '')
+
+            if url:
+                st.markdown(f"**{i+1}. [{title}]({url})** {source_tag} {time_tag}")
+            else:
+                st.markdown(f"**{i+1}. {title}** {source_tag} {time_tag}")
+            if n.get('summary'):
+                st.caption(n['summary'][:150])
+    else:
+        st.info("📭 未抓取基金相关新闻，请开启侧边栏「联网抓取新闻」")
+
+    # ---- AI 分析（需要 Ollama） ----
+    if ollama_ok:
+        st.markdown("---")
+        st.markdown("### 🤖 AI 深度分析")
+
+        # 使用预计算的 summary
+        _tab5_summary = summary
+
+        # 使用预计算的预测结果
+        if _result is None:
+            with st.spinner("正在运行预测模型..."):
+                _result = train_and_predict(df, code, pred_days=pred_days)
+
+        if fetch_news and news_list and _result is not None:
+            analyze_col1, analyze_col2 = st.columns(2)
+
+            with analyze_col1:
+                # 新闻情绪分析
+                with st.spinner("🧠 AI 正在分析新闻情绪..."):
+                    sentiment = analyze_news_sentiment(news_list)
+
+                st.markdown("#### 📊 新闻情绪分析")
+                score = sentiment.get("sentiment_score", 0)
+                score_color = "#26a69a" if score > 0.1 else ("#ef5350" if score < -0.1 else "#ffc107")
+                st.markdown(f"""
+                <div style="background:#1e1e1e;padding:16px;border-radius:8px;margin:8px 0">
+                    <h3 style="color:{score_color};margin:0">情绪得分: {score:.2f}</h3>
+                    <p style="color:#aaa;margin:4px 0">标签: {sentiment.get('sentiment_label','')}</p>
+                    <p style="font-size:14px">{sentiment.get('summary','')}</p>
+                </div>
+                """, unsafe_allow_html=True)
+
+                if sentiment.get("key_events"):
+                    st.markdown("**📌 关键事件：**")
+                    for e in sentiment["key_events"][:5]:
+                        st.markdown(f"- {e}")
+
+            with analyze_col2:
+                # 预测解读
+                with st.spinner("🧠 AI 正在解读预测..."):
+                    pred_explain = explain_prediction(_result, _tab5_summary)
+
+                st.markdown("#### 🔮 预测解读")
+                st.info(pred_explain)
+
+            # ---- AI 综合报告 ----
+            st.markdown("---")
+            st.markdown("### 📝 AI 综合分析报告")
+
+            with st.spinner("🧠 AI 正在撰写分析报告（可能需要数十秒）..."):
+                report = generate_analysis_report(
+                    fund_name=fund_name,
+                    code=code,
+                    indicators=_tab5_summary,
+                    news=news_list,
+                    sentiment=sentiment,
+                    prediction=_result,
+                )
+
+            st.markdown(f"""
+            <div style="background:#1a1a2e;padding:20px;border-radius:10px;border-left:4px solid #1f77b4;margin:12px 0">
+                <p style="white-space:pre-wrap;line-height:1.8;color:#e0e0e0">{report}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        elif not fetch_news:
+            st.info("💡 请开启侧边栏「📰 联网抓取新闻」以启用 AI 分析")
+
+        # ---- AI 问答 ----
+        st.markdown("---")
+        st.markdown("### 💬 向 AI 提问")
+
+        _tab5_result = _result if _result is not None else train_and_predict(df, code, pred_days=pred_days)
+
+        context = {
+            "nav": f"{_tab5_result.get('last_nav', 'N/A')}",
+            "rsi": _tab5_summary.get('rsi_status', 'N/A'),
+            "trend": _tab5_summary.get('trend', 'N/A'),
+            "lstm_trend": _tab5_result.get('lstm_trend', 'N/A'),
+            "up_prob": f"{_tab5_result.get('xgb_up_prob', 0)*100:.1f}%",
+        }
+
+        user_question = st.text_input(
+            "🔍 输入你的问题",
+            placeholder="例如：这只基金现在适合买入吗？最近的新闻对它有什么影响？",
+        )
+
+        if user_question:
+            with st.spinner("🧠 AI 思考中..."):
+                answer = chat_about_fund(fund_name, code, user_question, context)
+            st.markdown(f"""
+            <div style="background:#1e1e1e;padding:16px;border-radius:8px;margin:8px 0;border-left:3px solid #ff7f0e">
+                <p style="white-space:pre-wrap;color:#e0e0e0">🤖 <strong>AI 回答：</strong><br>{answer}</p>
+            </div>
+            """, unsafe_allow_html=True)
 
 # ============================================================
 # 页脚
