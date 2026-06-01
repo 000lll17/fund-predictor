@@ -47,6 +47,12 @@ from llm_analyzer import (
     chat_about_fund,
     explain_prediction,
 )
+from recommender import (
+    WATCHLIST,
+    run_daily_scan,
+    generate_recommendation,
+    _load_rec_cache,
+)
 
 # ============================================================
 # 侧边栏 — 参数输入
@@ -188,9 +194,216 @@ _result = None
 # Tab 布局
 # ============================================================
 
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    ["📊 历史走势", "📉 技术指标", "🔔 买卖信号", "🤖 AI 预测", "🧠 智能分析"]
+tab_rec, tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    ["🌟 每日推荐", "📊 历史走势", "📉 技术指标", "🔔 买卖信号", "🤖 AI 预测", "🧠 智能分析"]
 )
+
+# ============================================================
+# Tab 0: 每日推荐
+# ============================================================
+
+with tab_rec:
+    st.subheader("🌟 每日基金智能推荐")
+    st.caption("综合技术指标 + ML 模型预测 + AI 大模型分析，每日精选值得关注的基金")
+
+    st.warning(
+        "⚠️ **重要声明**：以下推荐完全基于历史数据的量化分析和 AI 模型判断，"
+        "**不构成任何投资建议**。基金投资有风险，请根据自身情况独立决策。"
+    )
+
+    # ---- 扫描按钮 + 进度 ----
+    col_scan, col_info = st.columns([1, 3])
+
+    with col_scan:
+        scan_btn = st.button(
+            "🔍 开始每日扫描",
+            type="primary",
+            use_container_width=True,
+            help=f"扫描 {len(WATCHLIST)} 只精选基金，分析技术面和预测面，给出综合评分",
+        )
+
+    with col_info:
+        # 显示缓存信息
+        cached = _load_rec_cache()
+        if cached:
+            cache_date = cached.get("date", "?")
+            count = len(cached.get("results", []))
+            st.info(f"📦 已有今日 ({cache_date}) 缓存结果，共 {count} 只基金。可直接查看或重新扫描。")
+
+    # ---- 执行扫描 ----
+    if scan_btn:
+        # 清除所有基金数据缓存，获取最新净值
+        clear_cache(None)
+
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        def update_progress(current, total, name):
+            progress_bar.progress(current / total)
+            status_text.text(f"正在分析 [{current}/{total}]：{name} ...")
+
+        with st.spinner("正在扫描基金池..."):
+            all_results = run_daily_scan(
+                force_refresh=True,
+                progress_callback=update_progress,
+            )
+
+        progress_bar.empty()
+        status_text.empty()
+
+        if all_results:
+            st.success(f"✅ 扫描完成！共分析 {len(all_results)} 只基金")
+            st.session_state["rec_results"] = all_results
+        else:
+            st.error("扫描失败，未获得结果")
+
+    # ---- 展示结果 ----
+    results = st.session_state.get("rec_results")
+    if results is None:
+        # 尝试加载今日缓存
+        cached = _load_rec_cache()
+        if cached and "results" in cached:
+            results = cached["results"]
+
+    if results:
+        # ---- AI 推荐总结 ----
+        st.markdown("---")
+        st.markdown("### 🤖 AI 推荐总结")
+
+        ollama_ok, _ = check_ollama_available()
+        if ollama_ok:
+            with st.spinner("🧠 AI 正在撰写今日推荐总结..."):
+                ai_summary = generate_recommendation(results[:8])
+            st.markdown(f"""
+            <div style="background:#1a1a2e;padding:20px;border-radius:10px;border-left:4px solid #ff7f0e;margin:12px 0">
+                <p style="white-space:pre-wrap;line-height:1.8;color:#e0e0e0">{ai_summary}</p>
+            </div>
+            """, unsafe_allow_html=True)
+        else:
+            st.info("💡 启动 Ollama 后可获得 AI 撰写的个性化推荐总结")
+
+        # ---- 推荐排名 ----
+        st.markdown("---")
+        st.markdown("### 📊 基金评分排名")
+
+        top_results = [r for r in results if not r.get("error")]
+        error_results = [r for r in results if r.get("error")]
+
+        if top_results:
+            for rank, fund in enumerate(top_results, 1):
+                total = fund["total_score"]
+                tech = fund["tech_score"]
+                pred = fund["pred_score"]
+                perf = fund["perf_score"]
+                badge = fund.get("badge", "")
+
+                # 评分颜色
+                if total >= 75:
+                    score_color = "#26a69a"
+                    border_color = "#26a69a"
+                elif total >= 65:
+                    score_color = "#42a5f5"
+                    border_color = "#42a5f5"
+                elif total >= 50:
+                    score_color = "#ffc107"
+                    border_color = "#ffc107"
+                else:
+                    score_color = "#ef5350"
+                    border_color = "#ef5350"
+
+                st.markdown(f"""
+                <div style="background:#1e1e1e;padding:16px;border-radius:10px;
+                            border-left:4px solid {border_color};margin:8px 0">
+                    <div style="display:flex;justify-content:space-between;align-items:center">
+                        <div>
+                            <span style="font-size:18px;font-weight:bold;color:white">
+                                #{rank} {fund['name']}</span>
+                            <span style="color:#aaa;margin-left:8px">{fund.get('category','')}</span>
+                            <span style="color:#aaa;margin-left:8px">{fund['code']}</span>
+                        </div>
+                        <div style="text-align:right">
+                            <span style="font-size:24px;font-weight:bold;color:{score_color}">
+                                {total}</span><span style="color:#aaa">/100</span>
+                            <br><span style="font-size:13px;color:{score_color}">{badge}</span>
+                        </div>
+                    </div>
+                    <div style="margin-top:10px;display:flex;gap:20px;font-size:13px;color:#ccc">
+                        <span>📈 技术面: <b>{tech}/40</b></span>
+                        <span>🤖 ML预测: <b>{pred}/40</b></span>
+                        <span>📊 近期: <b>{perf}/20</b></span>
+                    </div>
+                    <div style="margin-top:8px;font-size:12px;color:#aaa">
+                        {' · '.join(fund.get('details', [])[:4])}
+                    </div>
+                    <div style="margin-top:8px">
+                        <span style="font-size:12px;color:#666">
+                            最新净值: {fund.get('last_nav', 'N/A')}
+                            {f"| RSI: {fund.get('rsi', 'N/A')}" if fund.get('rsi') is not None else ""}
+                            {f"| MACD柱: {fund.get('macd_hist', 'N/A')}" if fund.get('macd_hist') is not None else ""}
+                        </span>
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+
+                # 「查看详情」按钮 — 复制基金代码到剪贴板提示
+                st.button(
+                    f"🔍 分析 {fund['name']} ({fund['code']})",
+                    key=f"analyze_{fund['code']}",
+                    use_container_width=False,
+                    help=f"点击后在顶部输入 {fund['code']} 并点击开始分析",
+                    on_click=lambda c=fund['code']: setattr(st.session_state, "goto_code", c),
+                )
+
+        # 显示错误基金
+        if error_results:
+            with st.expander(f"⚠️ {len(error_results)} 只基金分析失败（点击展开）"):
+                for f in error_results:
+                    st.caption(f"❌ {f['name']} ({f['code']}): {'; '.join(f.get('details', []))}")
+
+        # ---- 评分说明 ----
+        with st.expander("📖 评分规则说明"):
+            st.markdown("""
+            | 维度 | 满分 | 评分依据 |
+            |------|------|---------|
+            | 📈 技术面 | 40分 | RSI 位置、MACD 多空、均线排列、布林带位置 |
+            | 🤖 ML预测 | 40分 | LSTM 趋势方向与幅度、XGBoost 上涨概率 |
+            | 📊 近期表现 | 20分 | 近5日平均涨跌幅、波动率稳定性 |
+
+            **评分等级**：
+            - 🌟 ≥75分：强烈推荐 — 技术面+预测面共振
+            - 👍 65-74分：推荐关注 — 多数指标向好
+            - 👀 50-64分：一般关注 — 多空分歧
+            - ⏸️ <50分：暂时观望 — 信号偏空
+            """)
+
+    else:
+        st.info(f"""
+        👈 点击「🔍 开始每日扫描」按钮，系统将自动分析 **{len(WATCHLIST)}** 只精选基金：
+
+        {''.join(f'- {f["desc"]}（{f["code"]}）— {f["category"]}\\n' for f in WATCHLIST)}
+
+        扫描过程约需 1-2 分钟，请耐心等待。
+        """)
+
+    # ---- 联动：如果从推荐卡片点击了分析 ----
+    if "goto_code" in st.session_state and st.session_state.goto_code:
+        target_code = st.session_state.goto_code
+        st.session_state.goto_code = None
+        # 直接跳转 — 通过更新 sidebar 的 text_input 值（需要用查询参数）
+        st.markdown(f"""
+        <script>
+            // 尝试填入基金代码到输入框
+            const inputs = parent.document.querySelectorAll('input[type="text"]');
+            for (let inp of inputs) {{
+                if (inp.value === '' || inp.value === '000001') {{
+                    inp.value = '{target_code}';
+                    inp.dispatchEvent(new Event('input', {{bubbles: true}}));
+                    break;
+                }}
+            }}
+        </script>
+        """, unsafe_allow_html=True)
+        st.info(f"👆 已填入基金代码 **{target_code}**，请点击左侧「🚀 开始分析」按钮查看详细分析")
 
 # ============================================================
 # Tab 1: 历史走势
